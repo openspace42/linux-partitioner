@@ -1,0 +1,269 @@
+#!/bin/bash
+
+set -e
+set -u
+
+r=`tput setaf 1`
+g=`tput setaf 2`
+l=`tput setaf 4`
+m=`tput setaf 5`
+x=`tput sgr0`
+b=`tput bold`
+
+# Don't change | No trailing slash
+projname="linux-partitioner"
+sourcedir=/root/$projname
+basedir=/root/openspace42
+installdir=$basedir/magnetico
+
+scriptname=`basename "$0"`
+hostname=`hostname`
+
+echo
+echo "${b}Now initiating $projname...${x}"
+echo
+
+if [[ $EUID -ne 0 ]]
+then
+	echo "${r}${b}This script must be run as root. Run it as:${x}"
+	echo
+	echo "${b}sudo bash $sourcedir/$scriptname${x}"
+	echo
+	echo "${b}Exiting...${x}"
+	echo
+	exit
+fi
+
+echo "${b}Here are your available disks:${x}"
+echo
+
+COUNT=1
+lsblk -dn -o NAME,SIZE,TYPE | grep disk | while read LINE ; do
+    echo "Disk $COUNT is $LINE"
+    let COUNT=COUNT+1
+done
+echo
+
+read -p "${b}[press enter to continue reading...]${x}"
+clear
+
+
+
+IFS=, read -r -a array <<< "$(lsblk -dn -o NAME,SIZE,TYPE | grep disk | tr '\n' , )"
+
+arraysize="$(echo ${#array[@]})"
+echo $arraysize
+
+function choosedisk {
+        n=0
+   for disk in "${array[@]}"
+        do
+             printf "$n: $disk\n"
+                n=$((n+1))
+        done
+   read choice
+}
+
+# Create array of disks to choose from.
+n=0
+lsblk -dn -o NAME,SIZE,TYPE | while read line; do
+        array[$n]=$line
+        n=$((n+1))
+done
+
+# Ask user to choose disk.
+echo "${b}Please choose a disk:${x}"
+echo
+accept=n
+until [ $accept = "y" ]
+do
+
+	select seldisk in "${array[@]}" "exit"
+	do
+		echo
+		case $seldisk in
+			*disk)
+				diskid="$(echo $seldisk | awk '{print $1;}')"
+				echo "${b}Disk | ${g}"$(echo "$diskid")"${x}${b} | selected.${x}"
+				break
+				;;
+			"exit")
+				echo "${b}Exiting...${x}"
+				echo
+				exit
+				;;
+			*)
+				echo "${r}${b}Invalid option. Retry...${x}"
+				echo
+				;;
+		esac
+	done
+	echo
+
+	valid=n
+	until [ $valid = "y" ]
+	do
+		read -n 1 -p "${b}Is this the correct disk?${x} (${b}Y${x}[es]/${b}n${x}[o]/${b}e${x}[xit]) " answer;
+		case $answer in
+		"")
+			echo
+			valid=y
+			accept=y
+			;;
+		y)
+			echo -e "\n"
+			valid=y
+			accept=y
+			;;
+		n)
+			echo -e "\n"
+			echo "${b}No problem, please select your desired disk again now...${x}"
+			echo
+			valid=y
+			accept=n
+			;;
+		e)
+			echo -e "\n"
+			echo "${b}Exiting...${x}"
+			echo
+			exit
+			;;
+		*)
+			echo -e "\n"
+			echo "${b}Invalid option. Retry...${x}"
+			echo
+			valid=n
+			accept=n
+			;;
+		esac
+	done
+
+done
+
+echo "${r}${b}Are you sure you want to format disk | ${x}${b}"$(echo "$diskid")"${r}${b} | ?${x}"
+echo
+valid=n
+until [ $valid = "y" ]
+do
+	read -p "${b}Type in the word | ${r}continue${x}${b} | to proceed or | ${g}exit${x}${b} | to exit: ${x} " answer;
+	case $answer in
+	"continue")
+		echo
+		echo "${b}Ok, formatting disk...${x}"
+		echo
+		valid=y
+		accept=y
+		;;
+	"exit")
+		echo
+		echo "${b}Exiting...${x}"
+		echo
+		exit
+		;;
+	*)
+		echo
+		echo "${b}Invalid option. Retry...${x}"
+		echo
+		valid=n
+		accept=n
+		;;
+	esac
+done
+
+
+
+defined=n
+until [ $defined = "y" ]
+do
+	disklabel=""
+	until [ ! $disklabel = "" ]
+	do
+		read -p "${b}Now specify a label for this disk [any name is good]: ${x}" disklabel
+		echo
+	done
+	valid=n
+	until [ $valid = "y" ]
+	do
+		read -n 1 -p "${b}Is | $disklabel | correct? (Y/n/e[xit]) ${x}" answer;
+		case $answer in
+		"")
+			echo
+			valid=y
+			defined=y
+			;;
+		y)
+			echo -e "\n"
+			valid=y
+			defined=y
+			;;
+		n)
+			echo -e "\n"
+			echo "${b}Ok, then please try again...${x}"
+			echo
+			valid=y
+			defined=n
+			;;
+		e)
+			echo -e "\n"
+        		echo "${b}Exiting...${x}"
+        		echo
+        		exit
+        		;;
+		*)
+			echo -e "\n"
+			echo "${r}${b}Invalid option. Retry...${x}"
+        		echo
+			valid=n
+		defined=n
+	        ;;
+		esac
+	done
+done
+
+
+
+diskpath="/dev/$diskid"
+partpath="${diskpath}1"
+mountpath=/media/$disklabel
+
+mkdir -p $mountpath
+
+umount $diskpath* 2> /dev/null || true
+dd if=/dev/zero of=$diskpath bs=512  count=1
+
+# Creating the GUID Partition Table (GPT)
+parted $diskpath mklabel gpt
+
+# Creating partition label
+parted --align optimal $diskpath mkpart primary ext4 0% 100%
+
+sleep 3
+
+# Creating the partition
+mkfs.ext4 -FL $disklabel $partpath
+
+# Add disk to fstab
+fs_uuid=$(blkid -s UUID -o value $partpath)
+if grep -q "[label ${disklabel}]" /etc/fstab
+then
+	sed -i "/\[label ${disklabel}\]/d" /etc/fstab
+fi
+if grep -q "$fs_uuid" /etc/fstab
+then
+	sed -i "/${fs_uuid}/d" /etc/fstab
+fi
+echo -e "UUID=$fs_uuid\t$mountpath\text4\tdefaults 0 0\t# Added by linux-partitioner [label $disklabel]" >> /etc/fstab
+
+# Remount /etc/fstab without rebooting
+mount -a
+
+echo "${g}${b}All done!${x}"
+echo
+echo "${b}The partition we created is:${x}"
+echo
+echo "${b}  $partpath ${x}"
+echo
+echo "${b}And it now is and always will be automatically mounted at:${x}"
+echo
+echo "${b}  $mountpath ${x}"
+echo
